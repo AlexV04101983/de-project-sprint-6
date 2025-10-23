@@ -46,7 +46,7 @@ class OrdersDdsRepository:
                 """
                     INSERT INTO dds.dm_orders (order_key, order_status, user_id, restaurant_id, timestamp_id, courier_id) 
                     VALUES (%(order_key)s, %(order_status)s, %(user_id)s, %(restaurant_id)s, %(timestamp_id)s, %(courier_id)s)
-                    ON CONFLICT (id) DO UPDATE
+                    ON CONFLICT (order_key) DO UPDATE
                     SET
                         order_key = EXCLUDED.order_key,  
                         order_status = EXCLUDED.order_status,
