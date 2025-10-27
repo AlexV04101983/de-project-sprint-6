@@ -1,0 +1,153 @@
+create table if not exists VT2510213F5A0D__DWH.l_user_group_activity(
+	hk_l_user_group_activity bigint primary key,
+	hk_user_id bigint not null CONSTRAINT fk_l_user_group_activity_user REFERENCES VT2510213F5A0D__DWH.h_users (hk_user_id),
+	hk_group_id bigint not null CONSTRAINT fk_l_user_group_groups REFERENCES VT2510213F5A0D__DWH.h_groups (hk_group_id),	
+	load_dt datetime,
+	load_src varchar(20)
+)
+order by load_dt
+SEGMENTED BY hk_l_user_group_activity all nodes
+PARTITION BY load_dt::date
+GROUP BY calendar_hierarchy_day(load_dt::date, 3, 2);
+
+--S6-Project Заполнение таблицы l_user_group_activity
+INSERT INTO VT2510213F5A0D__DWH.l_user_group_activity(
+	hk_l_user_group_activity, 
+	hk_user_id,
+	hk_group_id,
+	load_dt,
+	load_src
+	)
+select distinct
+	hash(hk_user_id, hk_group_id) as hk_l_user_group_activity,
+	hu.hk_user_id,
+	hg.hk_group_id,
+   	now() as load_dt,
+	's3' as load_src
+from 
+	VT2510213F5A0D__STAGING.group_log gl
+left join 
+	VT2510213F5A0D__DWH.h_users hu on hu.user_id  = gl.user_id
+left join 
+	VT2510213F5A0D__DWH.h_groups hg on hg.group_id = gl.group_id
+;
+
+create table if not exists VT2510213F5A0D__DWH.s_auth_history(
+	hk_l_user_group_activity bigint not null CONSTRAINT fk_s_auth_history_l_user_group_activity REFERENCES VT2510213F5A0D__DWH.l_user_group_activity (hk_l_user_group_activity),
+	user_id_from integer,
+	event varchar(100),
+	event_dt timestamp(0),
+	load_dt datetime,
+	load_src varchar(20)	
+)
+order by load_dt
+SEGMENTED BY hk_l_user_group_activity all nodes
+PARTITION BY load_dt::date
+GROUP BY calendar_hierarchy_day(load_dt::date, 3, 2);
+
+
+INSERT INTO 
+	VT2510213F5A0D__DWH.s_auth_history(
+		hk_l_user_group_activity,
+		user_id_from,
+		event,
+		event_dt,
+		load_dt,load_src
+		)
+select 
+	luga.hk_l_user_group_activity as hk_l_user_group_activity,
+	gl.user_id_from,
+	gl.event as event,
+	gl.datetime as avent_dt,
+	now() as load_dt,
+	's3' as load_src
+from 
+VT2510213F5A0D__STAGING.group_log as gl
+left join VT2510213F5A0D__DWH.h_groups as hg on gl.group_id = hg.group_id
+left join VT2510213F5A0D__DWH.h_users as hu on gl.user_id = hu.user_id
+left join VT2510213F5A0D__DWH.l_user_group_activity as luga on hg.hk_group_id = luga.hk_group_id and hu.hk_user_id = luga.hk_user_id;
+
+create table if not exists VT2510213F5A0D__STAGING.group_log (
+	group_id integer,
+	user_id integer,
+	user_id_from integer,
+	event varchar(100),
+	datetime timestamp(0),
+	CONSTRAINT PKEY_DIALOGS_MESSAGE_ID PRIMARY KEY (group_id)
+)
+ORDER BY group_id
+PARTITION BY datetime::date
+GROUP BY calendar_hierarchy_day(datetime::date, 3, 2);
+
+COPY VT2510213F5A0D__STAGING.group_log(group_id, user_id, user_id_from, event, datetime)
+FROM LOCAL '/data/group_log.csv'
+DELIMITER ','
+REJECTED DATA AS TABLE VT2510213F5A0D__STAGING.group_log_rej;
+
+
+--CTE для user_group_messages
+with user_group_messages as (
+select 
+	grusmes.hk_group_id as hk_group_id,
+	count(distinct grusmes.hk_user_id) as cnt_users_in_group_with_messages
+from
+	(select 
+		uga.hk_group_id as hk_group_id,
+		lum.hk_user_id as hk_user_id, 
+		count(lum.hk_message_id) as messages_count
+	from
+		VT2510213F5A0D__DWH.l_user_message lum
+	left join 
+		VT2510213F5A0D__DWH.l_user_group_activity uga on lum.hk_user_id = uga.hk_user_id
+	group by 
+		uga.hk_group_id,lum.hk_user_id
+	having 
+		count(lum.hk_message_id) > 0
+	) grusmes
+group by 
+	grusmes.hk_group_id
+), 
+user_group_log as (
+	select 
+		hk_group_id as hk_group_id,
+		count(hk_user_id) as cnt_added_users
+	from
+	(
+		select
+			lugo.hk_group_id as hk_group_id,
+			hu.hk_user_id as hk_user_id
+		from 
+			VT2510213F5A0D__DWH.h_users hu
+		left join 
+			VT2510213F5A0D__DWH.l_user_group_activity lugo on lugo.hk_user_id = hu.hk_user_id
+		where 
+			hu.user_id in (
+				select
+					distinct sah.user_id_from
+				from 
+					VT2510213F5A0D__DWH.s_auth_history sah 
+				where 
+					sah.user_id_from is not null 
+				and 
+					sah.event = 'add'
+			)
+			and lugo.hk_group_id in (
+				select 
+					hg.hk_group_id as hk_group_id
+				from
+					VT2510213F5A0D__DWH.h_groups hg
+				order by hg.registration_dt asc limit 10	
+			)		
+	) group_details
+	group by group_details.hk_group_id
+)
+select
+	ugl.hk_group_id,
+	ugl.cnt_added_users,
+	ugm.cnt_users_in_group_with_messages,
+	(ugm.cnt_users_in_group_with_messages / ugl.cnt_added_users) as group_conversion
+from 
+	user_group_log as ugl
+left join 
+	user_group_messages as ugm on ugl.hk_group_id = ugm.hk_group_id
+order by ugm.cnt_users_in_group_with_messages / ugl.cnt_added_users desc 
